@@ -1,0 +1,6 @@
+requests==2.32.5
+
+# Test suite (tests/). No network, no data/ -- meant to run before any
+# download so a header drift or a filter bug is caught before we trust what
+# we fetched.
+pytest>=7.0
