@@ -69,6 +69,32 @@ def test_iter_all_committees_has_no_state_filter():
     assert ids == {"C00458964", "C00812345", "C00111222"}  # CA one included
 
 
+def test_sole_top_level_member_preferred_over_by_date_split():
+    """Real bug, found on the first real full-size pull (2026-09-16):
+    indiv24.zip has a top-level itcont.txt (the complete cycle) PLUS a
+    redundant by_date/ breakdown of the SAME rows split by date range --
+    confirmed byte-for-byte (by_date/*.txt sizes sum to itcont.txt's size
+    exactly). _open_sole_member() must pick the sole top-level member and
+    ignore by_date/*, or every row gets counted twice."""
+    from filter_ne import _iter_rows
+    import zipfile
+
+    multi_member_zip = FIXTURES / "_multi_member_by_date.zip"
+    with zipfile.ZipFile(multi_member_zip, "w") as zf:
+        zf.writestr("itcont.txt", "C00458964|N|Q1|G2024|IMG1|15|IND|SMITH, JANE"
+                     "|LINCOLN|NE|68508|||20240101|100||T1|1|||SUB1\n")
+        zf.writestr("by_date/itcont_2024_20240101_20240201.txt",
+                     "C00458964|N|Q1|G2024|IMG1|15|IND|SMITH, JANE"
+                     "|LINCOLN|NE|68508|||20240101|100||T1|1|||SUB1\n")
+        zf.writestr("by_date/itcont_2024_invalid_dates.txt", "")
+    try:
+        rows = list(_iter_rows(multi_member_zip, INDIV_HEADER))
+        assert len(rows) == 1
+        assert rows[0]["NAME"] == "SMITH, JANE"
+    finally:
+        multi_member_zip.unlink()
+
+
 def test_row_field_count_must_match_header():
     from filter_ne import _iter_rows
 

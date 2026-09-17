@@ -112,12 +112,32 @@ HEADERS = {"cn": CN_HEADER, "cm": CM_HEADER, "indiv": INDIV_HEADER}
 
 
 def _open_sole_member(zip_path: Path) -> tuple[zipfile.ZipFile, str]:
+    """Pick the one member holding the complete dataset.
+
+    Most bulk zips (cn<yy>.zip, cm<yy>.zip, and most indiv<yy>.zip files)
+    hold exactly one member. The largest indiv<yy>.zip files instead ship a
+    top-level <name>.txt holding the COMPLETE cycle *plus* a redundant
+    by_date/ breakdown of the same rows (split by date range, presumably a
+    courtesy for people who don't want the whole file) and a
+    by_date/..._invalid_dates.txt catch-all for rows that didn't sort into a
+    date bucket -- confirmed on a real 2024-cycle pull (2026-09-16):
+    indiv24.zip has itcont.txt (11,040,734,781 bytes uncompressed) plus 32
+    by_date/ members whose sizes sum to exactly that same total, byte for
+    byte. Reading by_date/*.txt IN ADDITION to the top-level file would
+    double-count every row, so this always prefers the sole top-level
+    (no "/" in the name) member when there is exactly one.
+    """
     zf = zipfile.ZipFile(zip_path)
     names = zf.namelist()
-    if len(names) != 1:
-        zf.close()
-        raise ValueError(f"expected exactly one member in {zip_path}, found {names!r}")
-    return zf, names[0]
+    top_level = [n for n in names if "/" not in n]
+    if len(top_level) == 1:
+        return zf, top_level[0]
+    if len(names) == 1:
+        return zf, names[0]
+    zf.close()
+    raise ValueError(
+        f"expected exactly one top-level member in {zip_path}, found {names!r}"
+    )
 
 
 def _iter_rows(zip_path: Path, header: list[str]) -> Iterator[dict]:

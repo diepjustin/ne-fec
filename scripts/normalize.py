@@ -44,7 +44,12 @@ Dedup, in order:
    fall back to `(cycle, image_num, tran_id)`.
 
 Rewritten from raw every run -- this module holds no accumulated state of
-its own; `data/raw/` is the only thing that persists.
+its own; `data/raw/` is the only thing that persists. `--cycle` accepts one
+or more cycles (default: every cycle with raw data on disk) and combines
+them into one write per output file -- calling this once per cycle used to
+silently overwrite the shared output files with only the last cycle's rows
+(a real bug, found on the first real multi-cycle pull, 2026-09-16); see
+run()'s docstring.
 """
 
 from __future__ import annotations
@@ -270,42 +275,76 @@ def write_csv(path: Path, columns: list[str], rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
-def run(cycle: int, *, retrieved_at: str, raw_dir: Path = RAW_DIR, out_dir: Path = None) -> dict:
+def _discover_cycles(raw_dir: Path) -> list[int]:
+    """Every cycle this repo has ever pulled raw data for, oldest first."""
+    if not raw_dir.exists():
+        return []
+    return sorted(int(p.name) for p in raw_dir.iterdir() if p.is_dir() and p.name.isdigit())
+
+
+def run(
+    cycles: Iterable[int], *, retrieved_at: str, raw_dir: Path = RAW_DIR, out_dir: Path = None
+) -> list[dict]:
+    """Combine every given cycle's NE-filtered rows into one set of processed
+    CSVs, in a single write per file.
+
+    Still "rewritten from raw every run, no accumulated state of its own"
+    (see module docstring) -- multi-cycle here means reading every requested
+    cycle's raw files together in one pass, not merging with a PRIOR run's
+    output. Real bug found on the first real multi-cycle pull (2026-09-16):
+    calling this once per cycle used to truncate-and-overwrite the shared
+    output files each time, so `--cycle 2024` followed by `--cycle 2026`
+    silently discarded 2024's 250,610 contribution rows and left only
+    2026's. Pass every cycle you want in the output in one call.
+    """
     out_dir = out_dir or DATA_DIR
-    cycle_dir = raw_dir / str(cycle)
+    all_candidates: list[dict] = []
+    all_committees: list[dict] = []
+    all_contributions: list[dict] = []
+    results = []
 
-    cn_zip = cycle_dir / f"cn{cycle % 100:02d}.zip"
-    cm_zip = cycle_dir / f"cm{cycle % 100:02d}.zip"
-    indiv_zip = cycle_dir / f"indiv{cycle % 100:02d}.zip"
+    for cycle in cycles:
+        cycle_dir = raw_dir / str(cycle)
 
-    candidates_raw = list(iter_ne_candidates(cn_zip)) if cn_zip.exists() else []
-    committees_raw = list(iter_ne_committees(cm_zip)) if cm_zip.exists() else []
+        cn_zip = cycle_dir / f"cn{cycle % 100:02d}.zip"
+        cm_zip = cycle_dir / f"cm{cycle % 100:02d}.zip"
+        indiv_zip = cycle_dir / f"indiv{cycle % 100:02d}.zip"
 
-    cmte_names: dict[str, str] = {}
-    if cm_zip.exists():
-        # Whole (small) cm file, for cmte_id -> name lookup only -- see
-        # filter_ne.iter_all_committees' docstring for why this is exempt
-        # from the never-hold-the-national-file rule.
-        cmte_names = {r["CMTE_ID"]: r.get("CMTE_NM", "") for r in iter_all_committees(cm_zip)}
+        candidates_raw = list(iter_ne_candidates(cn_zip)) if cn_zip.exists() else []
+        committees_raw = list(iter_ne_committees(cm_zip)) if cm_zip.exists() else []
 
-    contributions_raw = list(iter_ne_individuals(indiv_zip)) if indiv_zip.exists() else []
+        cmte_names: dict[str, str] = {}
+        if cm_zip.exists():
+            # Whole (small) cm file, for cmte_id -> name lookup only -- see
+            # filter_ne.iter_all_committees' docstring for why this is
+            # exempt from the never-hold-the-national-file rule.
+            cmte_names = {r["CMTE_ID"]: r.get("CMTE_NM", "") for r in iter_all_committees(cm_zip)}
 
-    candidates = build_candidates(candidates_raw, cycle=cycle, retrieved_at=retrieved_at)
-    committees = build_committees(committees_raw, cycle=cycle, retrieved_at=retrieved_at)
-    contributions = build_contributions(
-        contributions_raw, cycle=cycle, cmte_names=cmte_names, retrieved_at=retrieved_at
-    )
+        contributions_raw = list(iter_ne_individuals(indiv_zip)) if indiv_zip.exists() else []
 
-    write_csv(out_dir / "fec_candidates_ne.csv", CANDIDATES_COLUMNS, candidates)
-    write_csv(out_dir / "fec_committees_ne.csv", COMMITTEES_COLUMNS, committees)
-    write_csv(out_dir / "fec_contributions_ne.csv", CONTRIBUTIONS_COLUMNS, contributions)
+        candidates = build_candidates(candidates_raw, cycle=cycle, retrieved_at=retrieved_at)
+        committees = build_committees(committees_raw, cycle=cycle, retrieved_at=retrieved_at)
+        contributions = build_contributions(
+            contributions_raw, cycle=cycle, cmte_names=cmte_names, retrieved_at=retrieved_at
+        )
 
-    return {
-        "cycle": cycle,
-        "candidates": len(candidates),
-        "committees": len(committees),
-        "contributions": len(contributions),
-    }
+        all_candidates += candidates
+        all_committees += committees
+        all_contributions += contributions
+        results.append(
+            {
+                "cycle": cycle,
+                "candidates": len(candidates),
+                "committees": len(committees),
+                "contributions": len(contributions),
+            }
+        )
+
+    write_csv(out_dir / "fec_candidates_ne.csv", CANDIDATES_COLUMNS, all_candidates)
+    write_csv(out_dir / "fec_committees_ne.csv", COMMITTEES_COLUMNS, all_committees)
+    write_csv(out_dir / "fec_contributions_ne.csv", CONTRIBUTIONS_COLUMNS, all_contributions)
+
+    return results
 
 
 def main(argv=None) -> int:
@@ -313,13 +352,26 @@ def main(argv=None) -> int:
     from datetime import datetime, timezone
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cycle", type=int, required=True)
+    parser.add_argument(
+        "--cycle", type=int, nargs="+", default=None,
+        help="one or more cycles to combine (default: every cycle with raw data under data/raw/)",
+    )
     args = parser.parse_args(argv)
 
-    result = run(args.cycle, retrieved_at=datetime.now(timezone.utc).isoformat())
+    cycles = args.cycle or _discover_cycles(RAW_DIR)
+    if not cycles:
+        print("no cycles found under data/raw/ -- nothing to normalize", file=sys.stderr)
+        return 1
+
+    results = run(cycles, retrieved_at=datetime.now(timezone.utc).isoformat())
+    for result in results:
+        print(
+            f"cycle {result['cycle']}: {result['candidates']} candidates, "
+            f"{result['committees']} committees, {result['contributions']} contributions"
+        )
     print(
-        f"cycle {result['cycle']}: {result['candidates']} candidates, "
-        f"{result['committees']} committees, {result['contributions']} contributions"
+        f"combined: {sum(r['contributions'] for r in results)} contributions "
+        f"across {len(results)} cycle(s)"
     )
     return 0
 
