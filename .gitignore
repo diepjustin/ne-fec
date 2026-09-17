@@ -1,5 +1,10 @@
 data/raw/
 data/processed/
+# Unlike ne-campaign-finance, this repo writes its processed CSVs straight to
+# data/ instead of data/processed/ (see ingest/sources.py's FEC_DATA comment
+# in ne-connect) -- ignore them explicitly here so a first push doesn't check
+# in output that normalize.py rebuilds from data/raw/ every run.
+data/fec_*_ne.csv
 venv/
 __pycache__/
 *.pyc
