@@ -1,0 +1,136 @@
+name: NE FEC weekly pull
+
+on:
+  schedule:
+    # Both fire every Sunday; the gate step lets through only the entry
+    # matching the current UTC offset, so exactly one does anything on any
+    # given Sunday. Two entries exist because GitHub Actions cron is UTC-only
+    # with no DST awareness -- see ne-lobbying's daily.yml for the incident
+    # that made gating on the fired cron entry (not the wall clock) the rule.
+    - cron: '0 8 * * 0'   # 3am Central during CDT (UTC-5, 08:00 UTC)
+    - cron: '0 9 * * 0'   # 3am Central during CST (UTC-6, 09:00 UTC)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: write   # for `gh cache delete` cleanup
+
+concurrency:
+  group: ne-fec-weekly
+  cancel-in-progress: false   # never cancel a run that might be mid-write to data/
+
+jobs:
+  weekly:
+    runs-on: ubuntu-latest
+    # indiv<yy>.zip is multi-GB (README: 11-60 min to download alone, plus
+    # unmeasured filter/decode time) -- budgeted as a bounded weekly job, not
+    # a nightly one, per PLAN.md Phase 3.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Pick the DST-correct cron entry, and today's current FEC cycle
+        id: gate
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          offset=$(TZ=America/Chicago date +%z)
+          case "$offset" in
+            -0500) want='0 8 * * 0' ;;   # CDT
+            -0600) want='0 9 * * 0' ;;   # CST
+            *)     want='' ;;
+          esac
+
+          if [ "${{ github.event_name }}" = 'workflow_dispatch' ]; then
+            proceed=true
+          elif [ -n "$want" ] && [ "$SCHEDULE" = "$want" ]; then
+            proceed=true
+          else
+            proceed=false
+            echo "Central offset is $offset, so today's real run is cron '$want'; this run came from '$SCHEDULE'. Skipping."
+          fi
+
+          # FEC's two-year election cycle is keyed by its even ending year
+          # (2024, 2026, ...) -- the "current" cycle a weekly pull refreshes.
+          year=$(TZ=America/Chicago date +%Y)
+          if [ $((year % 2)) -eq 1 ]; then cycle=$((year + 1)); else cycle=$year; fi
+
+          echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
+          echo "cycle=$cycle" >> "$GITHUB_OUTPUT"
+          echo "Central offset $offset -> proceed=$proceed cycle=$cycle"
+
+      - uses: actions/setup-python@v6
+        if: steps.gate.outputs.proceed == 'true'
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        if: steps.gate.outputs.proceed == 'true'
+        run: pip install -r requirements.txt
+
+      - name: Tests
+        if: steps.gate.outputs.proceed == 'true'
+        run: python3 -m pytest tests/ -q
+
+      - name: Restore data/ cache (older cycles, never re-downloaded)
+        if: steps.gate.outputs.proceed == 'true'
+        id: restore
+        uses: actions/cache/restore@v5
+        with:
+          path: data
+          key: ne-fec-data-${{ github.run_id }}
+          restore-keys: |
+            ne-fec-data-
+
+      # --force: download_bulk.py otherwise skips any dataset whose file
+      # already exists locally (see its module docstring) -- for a PAST
+      # cycle that's correct (nothing left to change), but the whole point of
+      # a weekly pull on the CURRENT cycle is to catch amendments FEC posts
+      # to it continuously. Without --force this job would silently stop
+      # refreshing the current cycle after its first successful run.
+      - name: Pull the current cycle's cn/cm/indiv
+        if: steps.gate.outputs.proceed == 'true'
+        run: >
+          python3 scripts/download_bulk.py --cycle ${{ steps.gate.outputs.cycle }}
+          --datasets cn cm indiv --force
+
+      # No --cycle: normalize.py combines every cycle it finds raw data for
+      # under data/raw/ (restored from cache above, plus this run's freshly
+      # pulled current cycle) into one write -- passing only the current
+      # cycle here would silently drop every older cycle's rows from the
+      # combined output (the real bug this project's own history found).
+      - name: Normalize (all cycles found under data/raw/)
+        if: steps.gate.outputs.proceed == 'true'
+        run: python3 scripts/normalize.py
+
+      - name: check_data.py (duplicate-key + privacy-column gate)
+        if: steps.gate.outputs.proceed == 'true'
+        run: python3 scripts/check_data.py
+
+      - name: Check data/ is worth caching
+        id: cachecheck
+        if: always() && steps.gate.outputs.proceed == 'true'
+        run: |
+          if ls data/fec_committees_ne.csv >/dev/null 2>&1; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            du -sh data
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::data holds no fec_committees_ne.csv -- skipping the cache save so the existing good cache stays the newest match."
+          fi
+
+      - name: Save data/ cache
+        if: always() && steps.cachecheck.outputs.ok == 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: data
+          key: ne-fec-data-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Delete old data/ cache entries (keep newest 3)
+        if: always() && steps.cachecheck.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --key ne-fec-data- --json id,createdAt --limit 100 \
+            | jq -r 'sort_by(.createdAt) | reverse | .[3:] | .[].id' \
+            | xargs -r -n1 gh cache delete
