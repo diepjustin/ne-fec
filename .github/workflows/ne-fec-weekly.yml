@@ -207,6 +207,13 @@ jobs:
           done
           if ls release/*.gz >/dev/null 2>&1; then
             tag="ne-fec-data-$(TZ=America/Chicago date +%Y-%m-%d)"
+            # Same-day re-run (a manual re-dispatch to pick up a fix, exactly
+            # what happened testing this workflow on 2026-09-19) would
+            # otherwise hit "a release with the same tag name already
+            # exists" and silently keep serving the FIRST run's stale data
+            # -- delete any existing same-day release first so a re-run
+            # actually replaces it.
+            gh release delete "$tag" --repo diepjustin/ne-fec --yes 2>/dev/null || true
             gh release create "$tag" release/*.gz \
               --repo diepjustin/ne-fec \
               --title "FEC hub data — $(TZ=America/Chicago date +%Y-%m-%d)" \
