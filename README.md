@@ -92,6 +92,14 @@ survive out of the (typically tens of millions) national rows in a modern cycle.
 a weekly, not nightly, cadence for this file per `ne-connect/PLAN.md`'s Phase 3 plan —
 one polite GET per cycle, cached, never re-fetched unless the sha256 changes.
 
+**Historical scope**: `.github/workflows/ne-fec-weekly.yml`'s `FEC_START_CYCLE` (2024)
+is the earliest cycle this project pulls automatically — there is no other "cycles we
+cover" constant anywhere in this repo, so this is the one place that decision lives.
+Every run pulls every cycle from `FEC_START_CYCLE` up to the current one (each a no-op
+once cached, per `download_bulk.py`'s own skip-if-exists check), so a fresh/evicted
+cache self-heals on its own next run rather than silently staying short a cycle. Change
+this value here (and nowhere else) if the intended historical range changes.
+
 ## Schema (processed output)
 
 `fec_contributions_ne.csv`: `sub_id, cmte_id, cmte_name, amndt_ind, rpt_tp,

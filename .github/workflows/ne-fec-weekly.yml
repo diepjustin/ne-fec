@@ -24,8 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     # indiv<yy>.zip is multi-GB (README: 11-60 min to download alone, plus
     # unmeasured filter/decode time) -- budgeted as a bounded weekly job, not
-    # a nightly one, per PLAN.md Phase 3.
-    timeout-minutes: 180
+    # a nightly one, per PLAN.md Phase 3. 360 (GitHub's own hard per-job cap,
+    # so this is already the practical ceiling) rather than 180: a cold start
+    # (no past-cycle data cached at all) now pulls every past cycle in the
+    # same run -- see "Pull every past cycle's cn/cm/indiv" below -- and a
+    # warm run still finishes in the old single-cycle time regardless, so the
+    # higher ceiling costs nothing there.
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v5
 
@@ -81,6 +86,56 @@ jobs:
           key: ne-fec-data-${{ github.run_id }}
           restore-keys: |
             ne-fec-data-
+
+      # Log-only -- nothing below is gated on this. `cache-hit` (the obvious
+      # output) is true only on an EXACT primary-key match, and the primary
+      # key above embeds github.run_id, unique every run, so cache-hit is
+      # 'false' on every run forever, hit or miss. cache-matched-key is the
+      # real "did restore-keys match anything at all" signal (same trap
+      # ne-contracts/pages.yml's "Restore the last built payload" step
+      # already avoids by using cache-matched-key over cache-hit).
+      - name: Note a full cache miss, if this is one
+        if: steps.gate.outputs.proceed == 'true' && steps.restore.outputs.cache-matched-key == ''
+        run: echo "::warning::no data/ cache found under any ne-fec-data- key -- the pull-every-past-cycle step below will do real downloads instead of its usual no-op skips."
+
+      # Pull every past cycle's cn/cm/indiv on EVERY run, not gated on the
+      # cache-miss check above. download_bulk.py already skips a dataset
+      # whose file exists locally (dest.exists(), its own module docstring)
+      # without touching the network, so once a past cycle is cached this is
+      # a handful of cheap subprocess calls that print "already have ...,
+      # skipping" -- not a re-download. No --force: a past cycle's data
+      # never changes (nothing left to amend), unlike the current cycle
+      # below.
+      #
+      # Deliberately unconditional rather than cache-miss-gated: a miss-gated
+      # version would look right in the diff but stay broken in production.
+      # This workflow's own first real run (2026-09-19) hit a genuine full
+      # miss, pulled only the current cycle, and its own "Save data/ cache"
+      # step below banked that as a real cache entry. Every run after that
+      # matches a real, non-empty cache-matched-key -- so a step gated on
+      # "is this a miss" would see "no" forever and never pull the missing
+      # past cycle. Running this unconditionally self-heals that (and any
+      # future partial or evicted cache) without depending on cache-hit
+      # semantics for correctness.
+      #
+      # FEC_START_CYCLE isn't defined anywhere else in this repo (no
+      # project-wide "cycles we cover" constant exists in download_bulk.py,
+      # normalize.py, or a PLAN.md -- this repo has none). 2024 is simply the
+      # earliest cycle this project has ever pulled or validated against
+      # (README.md, data/scrape_meta.json). If the intended historical scope
+      # changes, update it here and in README.md -- nothing else reads it.
+      - name: Pull every past cycle's cn/cm/indiv (no-op once cached)
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          FEC_START_CYCLE: 2024
+        run: |
+          current=${{ steps.gate.outputs.cycle }}
+          cycle=$FEC_START_CYCLE
+          while [ "$cycle" -lt "$current" ]; do
+            echo "past cycle $cycle: cn/cm/indiv, no --force"
+            python3 scripts/download_bulk.py --cycle "$cycle" --datasets cn cm indiv
+            cycle=$((cycle + 2))
+          done
 
       # --force: download_bulk.py otherwise skips any dataset whose file
       # already exists locally (see its module docstring) -- for a PAST
