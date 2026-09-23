@@ -218,7 +218,7 @@ jobs:
             # exists" and silently keep serving the FIRST run's stale data
             # -- delete any existing same-day release first so a re-run
             # actually replaces it.
-            gh release delete "$tag" --repo diepjustin/ne-fec --yes 2>/dev/null || true
+            gh release delete "$tag" --repo diepjustin/ne-fec --yes --cleanup-tag 2>/dev/null || true
             gh release create "$tag" release/*.gz \
               --repo diepjustin/ne-fec \
               --title "FEC hub data — $(TZ=America/Chicago date +%Y-%m-%d)" \
@@ -237,4 +237,4 @@ jobs:
         run: |
           gh release list --repo diepjustin/ne-fec --json tagName,createdAt --limit 100 \
             | jq -r '[.[] | select(.tagName | startswith("ne-fec-data-"))] | sort_by(.createdAt) | reverse | .[3:] | .[].tagName' \
-            | xargs -r -n1 -I{} gh release delete {} --repo diepjustin/ne-fec --yes
+            | xargs -r -n1 -I{} gh release delete {} --repo diepjustin/ne-fec --yes --cleanup-tag
