@@ -159,6 +159,7 @@ jobs:
         run: python3 scripts/normalize.py
 
       - name: check_data.py (duplicate-key + privacy-column gate)
+        id: datacheck
         if: steps.gate.outputs.proceed == 'true'
         run: python3 scripts/check_data.py
 
@@ -197,7 +198,11 @@ jobs:
       # latest ne-fec-data-* release. Warn rather than fail: a missed release
       # here should never take down a pull that already succeeded.
       - name: Publish a data release for ne-connect
-        if: always() && steps.cachecheck.outputs.ok == 'true'
+        # Publish only data that passed check_data.py. data/ is restored from
+        # cache, so it exists even when this run's pull or gate failed --
+        # the file-exists check alone would ship (and rotate out a good
+        # release for) data the privacy/dedup gate rejected.
+        if: always() && steps.cachecheck.outputs.ok == 'true' && steps.datacheck.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -224,7 +229,9 @@ jobs:
           fi
 
       - name: Delete old hub-data releases (keep newest 3)
-        if: always() && steps.cachecheck.outputs.ok == 'true'
+        # Same gate as the publish step: never rotate out a good release on a
+        # run that didn't publish a new one.
+        if: always() && steps.cachecheck.outputs.ok == 'true' && steps.datacheck.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
